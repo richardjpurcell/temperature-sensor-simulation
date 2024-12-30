@@ -1,123 +1,127 @@
 from PyQt5.QtWidgets import QMainWindow, QVBoxLayout, QLabel, QWidget, QSlider, QHBoxLayout
 from PyQt5.QtCore import Qt, QTimer
 import pyqtgraph as pg
+import numpy as np
+from scipy.interpolate import interp1d
 from src.temperature_simulator import TemperatureSimulator
+from src.time_simulator import Time
 from src.transducer import Transducer
 
 class TemperatureVisualizer(QMainWindow):
     def __init__(self):
         super().__init__()
+
         self.setWindowTitle("Temperature Simulation with Transducer")
-        self.resize(800, 600)
+        self.resize(800, 800)  # Increased height for two plots
 
         # Main layout
         self.main_widget = QWidget()
         self.layout = QVBoxLayout(self.main_widget)
 
-        # PyQtGraph plot widgets
+        # PyQtGraph plot widget for actual temperature
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setLabel('left', "Temperature (°C)")
-        self.plot_widget.setLabel('bottom', "Days")
+        self.plot_widget.setLabel('bottom', "Minutes")
         self.layout.addWidget(self.plot_widget)
         self.plot = self.plot_widget.plot()
 
-        self.transducer_plot = pg.PlotWidget()
-        self.transducer_plot.setLabel('left', "Transducer Data (°C)")
-        self.transducer_plot.setLabel('bottom', "Days")
-        self.layout.addWidget(self.transducer_plot)
-        self.transducer_curve = self.transducer_plot.plot()
+        # PyQtGraph plot widget for transducer output
+        self.transducer_plot_widget = pg.PlotWidget()
+        self.transducer_plot_widget.setLabel('left', "Transducer Temp (°C)")
+        self.transducer_plot_widget.setLabel('bottom', "Minutes")
+        self.layout.addWidget(self.transducer_plot_widget)
+        self.transducer_plot = self.transducer_plot_widget.plot()
 
-        # Current day label
-        self.day_label = QLabel("Current Day: 1")
-        self.day_label.setAlignment(Qt.AlignCenter)
-        self.layout.addWidget(self.day_label)
+        # Current time label
+        self.time_label = QLabel("Current Time: 0 minutes")
+        self.time_label.setAlignment(Qt.AlignCenter)
+        self.layout.addWidget(self.time_label)
 
-        # Sliders for min and max temperatures
-        slider_layout = QHBoxLayout()
+        # Sampling rate slider
+        self.sampling_rate_label = QLabel("Sampling Rate: 60 minutes/sample")
+        self.layout.addWidget(self.sampling_rate_label)
 
-        self.min_temp_label = QLabel("Min Temp: 3°C")
-        self.max_temp_label = QLabel("Max Temp: 18°C")
+        self.sampling_rate_slider = QSlider(Qt.Horizontal)
+        self.sampling_rate_slider.setRange(1, 1440)  # 1 minute to 1 day (1440 minutes)
+        self.sampling_rate_slider.setValue(60)  # Default to 60 minutes/sample
+        self.sampling_rate_slider.valueChanged.connect(self.update_sampling_rate)
+        self.layout.addWidget(self.sampling_rate_slider)
 
-        self.min_temp_slider = QSlider(Qt.Horizontal)
-        self.min_temp_slider.setRange(-10, 15)
-        self.min_temp_slider.setValue(3)
-        self.min_temp_slider.valueChanged.connect(self.update_min_temp)
-
-        self.max_temp_slider = QSlider(Qt.Horizontal)
-        self.max_temp_slider.setRange(10, 40)
-        self.max_temp_slider.setValue(18)
-        self.max_temp_slider.valueChanged.connect(self.update_max_temp)
-
-        slider_layout.addWidget(self.min_temp_label)
-        slider_layout.addWidget(self.min_temp_slider)
-        slider_layout.addWidget(self.max_temp_label)
-        slider_layout.addWidget(self.max_temp_slider)
-
-        # Slider for samples per day
-        self.samples_per_day_label = QLabel("Samples/Day: 24")
-        self.samples_per_day_slider = QSlider(Qt.Horizontal)
-        self.samples_per_day_slider.setRange(1, 144)
-        self.samples_per_day_slider.setValue(24)
-        self.samples_per_day_slider.valueChanged.connect(self.update_samples_per_day)
-        slider_layout.addWidget(self.samples_per_day_label)
-        slider_layout.addWidget(self.samples_per_day_slider)
-
-        self.layout.addLayout(slider_layout)
         self.setCentralWidget(self.main_widget)
 
-        # Initialize simulator and transducer
+        # Initialize simulator, time, and transducer
+        self.time = Time(start_time=0, increment=60)  # Increment by 1 minute
         self.simulator = TemperatureSimulator()
-        self.transducer = Transducer(self.simulator)
+        self.transducer = Transducer(self.simulator, self.time, samples_per_day=24)  # 60-minute sampling
 
         # Initialize data
-        self.x_range = 3
-        self.x = []
-        self.temperatures = []
-        self.transducer_times = []
-        self.transducer_temps = []
-        self.scroll_offset = 0
-        self.current_day = 1
+        self.x_range = 1440  # Visible range in minutes (24 hours)
+        self.x = []  # X-axis data for actual temperature
+        self.temperatures = []  # Y-axis data for actual temperature
+        self.transducer_times = []  # X-axis data for transducer output
+        self.transducer_temps = []  # Y-axis data for transducer output
 
         # Timer for updates
         self.timer = QTimer()
-        self.timer.timeout.connect(self.update_temperature)
-        self.timer.start(50)
+        self.timer.timeout.connect(self.update_simulation)
+        self.timer.start(6)  # Faster scrolling with a 6 ms interval
 
-    def update_min_temp(self, value):
-        self.simulator.set_min_temp(value)
-        self.min_temp_label.setText(f"Min Temp: {value}°C")
+    def update_sampling_rate(self, value):
+        """Update the sampling rate of the transducer."""
+        samples_per_day = 1440 // value  # Calculate samples per day based on minutes/sample
+        self.transducer.set_samples_per_day(samples_per_day)
+        self.sampling_rate_label.setText(f"Sampling Rate: {value} minutes/sample")
 
-    def update_max_temp(self, value):
-        self.simulator.set_max_temp(value)
-        self.max_temp_label.setText(f"Max Temp: {value}°C")
+    def update_simulation(self):
+        """Update the temperature simulation and interpolate transducer output."""
+        self.time.advance()
+        current_time_seconds = self.time.get_current_time()
+        current_time_minutes = current_time_seconds / 60  # Convert seconds to minutes
 
-    def update_samples_per_day(self, value):
-        self.transducer.set_samples_per_day(value)
-        self.samples_per_day_label.setText(f"Samples/Day: {value}")
+        # Update label
+        self.time_label.setText(f"Current Time: {int(current_time_minutes)} minutes")
 
-    def update_temperature(self):
-        self.scroll_offset += 0.1
-        if self.scroll_offset >= 24:
-            self.scroll_offset = 0
-            self.current_day += 1
-            self.day_label.setText(f"Current Day: {self.current_day}")
-
-        new_time = (self.current_day - 1) + self.scroll_offset / 24
-        new_temperature = self.simulator.generate_temperature(new_time)
-
-        self.x.append(new_time)
+        # Generate new temperature
+        new_temperature = self.simulator.generate_temperature(current_time_seconds / 86400)  # Convert seconds to fraction of a day
+        self.x.append(current_time_minutes)
         self.temperatures.append(new_temperature)
 
-        transducer_temp = self.transducer.capture(new_time)
+        # Transducer sampling
+        transducer_temp = self.transducer.capture()
         if transducer_temp is not None:
-            self.transducer_times.append(new_time)
+            self.transducer_times.append(current_time_minutes)
             self.transducer_temps.append(transducer_temp)
 
-        if len(self.x) > self.x_range * 1000:
-            self.x.pop(0)
-            self.temperatures.pop(0)
+        # Interpolation for smooth scrolling
+        if len(self.transducer_times) > 1:
+            interpolation_func = interp1d(self.transducer_times, self.transducer_temps, kind="linear", fill_value="extrapolate")
+            interpolated_times = np.linspace(self.transducer_times[0], self.transducer_times[-1], len(self.x))
+            interpolated_temps = interpolation_func(interpolated_times)
+        else:
+            interpolated_times = self.transducer_times
+            interpolated_temps = self.transducer_temps
 
+        # Remove old data to maintain scrolling
+        if len(self.x) > self.x_range:
+            self.x = self.x[-self.x_range:]
+            self.temperatures = self.temperatures[-self.x_range:]
+        if len(self.transducer_times) > self.x_range:
+            self.transducer_times = self.transducer_times[-self.x_range:]
+            self.transducer_temps = self.transducer_temps[-self.x_range:]
+
+        # Update the plots
         self.plot.setData(self.x, self.temperatures)
-        self.transducer_curve.setData(self.transducer_times, self.transducer_temps)
+        self.transducer_plot.setData(interpolated_times, interpolated_temps)
+
+        # Update the visible range to scroll
         self.plot_widget.setXRange(self.x[-1] - self.x_range, self.x[-1])
-        self.transducer_plot.setXRange(self.x[-1] - self.x_range, self.x[-1])
+        self.transducer_plot_widget.setXRange(self.x[-1] - self.x_range, self.x[-1])
+
+if __name__ == "__main__":
+    import sys
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication(sys.argv)
+    window = TemperatureVisualizer()
+    window.show()
+    sys.exit(app.exec_())
